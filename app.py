@@ -1,153 +1,133 @@
-
-# Generate the Streamlit app code
-streamlit_code = f"""
 import streamlit as st
 import pandas as pd
 import pickle
 from sklearn.preprocessing import LabelEncoder
-import numpy as np
 
-# Load model and scaler
-try:
-    with open('gradient_boosting_model.pkl', 'rb') as file:
-        loaded_model = pickle.load(file)
-    with open('scaler.pkl', 'rb') as file:
-        loaded_scaler = pickle.load(file)
-    st.success("Model dan Scaler berhasil dimuat.")
-except FileNotFoundError:
-    st.error("Error: Model atau Scaler file tidak ditemukan. Pastikan 'gradient_boosting_model.pkl' dan 'scaler.pkl' ada di direktori yang sama.")
-    st.stop()
-except Exception as e:
-    st.error(f"Error saat memuat model/scaler: {{e}}")
-    st.stop()
+# --- 1. Muat model dan scaler yang telah disimpan ---
+# Menggunakan st.cache_resource agar model dan scaler hanya dimuat sekali
+@st.cache_resource
+def load_artifacts():
+    try:
+        with open('gradient_boosting_model.pkl', 'rb') as file:
+            loaded_model = pickle.load(file)
+        with open('scaler.pkl', 'rb') as file:
+            loaded_scaler = pickle.load(file)
+        return loaded_model, loaded_scaler
+    except FileNotFoundError:
+        st.error("File model atau scaler tidak ditemukan. Pastikan 'gradient_boosting_model.pkl' dan 'scaler.pkl' ada di direktori yang sama.")
+        st.stop() # Hentikan aplikasi jika file tidak ditemukan
 
-# Hardcoded categories and feature columns from training
-PENDIDIKAN_CATEGORIES = {pendidikan_categories}
-JURUSAN_CATEGORIES = {jurusan_categories}
-TRAINING_FEATURE_COLUMNS = {feature_cols_list}
+loaded_model, loaded_scaler = load_artifacts()
 
-# Reconstruct LabelEncoders
+# st.write("Model dan Scaler berhasil dimuat.") # Bisa dinonaktifkan untuk UI yang lebih bersih
+
+# --- 2. Rekonstruksi objek encoder dan mapping yang digunakan saat preprocessing ---
+
+# Mapping Jenis Kelamin (dari notebook: cell QbiI5O60rA-o)
+mapping_gender = {'Pria': 'Laki-laki', 'L': 'Laki-laki', 'Perempuan': 'Wanita', 'P': 'Wanita'}
+
+# Kategori unik untuk LabelEncoder (penting agar konsisten dengan saat training)
+# Berdasarkan df_bersih.unique() dari notebook dan cara LabelEncoder mengurutkan secara alfabetis:
+pendidikan_categories = ['D3', 'S1', 'SMA', 'SMK'] # Urutan alfabetis dari unique values saat training
+jurusan_categories = ['Administrasi', 'Desain Grafis', 'Otomotif', 'Teknik Las', 'Teknik Listrik'] # Urutan alfabetis
+
 le_pendidikan = LabelEncoder()
-le_pendidikan.fit(PENDIDIKAN_CATEGORIES)
+le_pendidikan.fit(pendidikan_categories)
 
 le_jurusan = LabelEncoder()
-le_jurusan.fit(JURUSAN_CATEGORIES)
+le_jurusan.fit(jurusan_categories)
 
-# Mapping gender used during preprocessing
-mapping_gender = {{'Pria': 'Laki-laki', 'L': 'Laki-laki', 'Perempuan': 'Wanita', 'P': 'Wanita'}}
+# Nama kolom fitur saat pelatihan (dari X.columns di notebook)
+training_feature_columns = ['Usia', 'Durasi_Jam', 'Nilai_Ujian', 'Pendidikan', 'Jurusan',
+                           'Jenis_Kelamin_Laki-laki', 'Jenis_Kelamin_Wanita',
+                           'Status_Bekerja_Belum Bekerja', 'Status_Bekerja_Sudah Bekerja']
 
-def preprocess_input(input_data):
-    df_new = pd.DataFrame([input_data])
 
-    # Apply gender mapping
+# --- 3. Definisikan fungsi preprocessing untuk data input baru ---
+def preprocess_new_data(new_raw_data):
+    df_new = pd.DataFrame([new_raw_data])
+
+    # Terapkan mapping pada kolom 'Jenis_Kelamin'
     df_new['Jenis_Kelamin'] = df_new['Jenis_Kelamin'].replace(mapping_gender)
 
-    # Label Encoding
-    df_new['Pendidikan_encoded'] = le_pendidikan.transform(df_new['Pendidikan'])
-    df_new['Jurusan_encoded'] = le_jurusan.transform(df_new['Jurusan'])
+    # Terapkan Label Encoding
+    # Gunakan .transform() dan pastikan nilai ada di classes_ LabelEncoder
+    df_new['Pendidikan_encoded'] = df_new['Pendidikan'].apply(lambda x: le_pendidikan.transform([x])[0] if x in le_pendidikan.classes_ else -1) # -1 sebagai indikator error
+    df_new['Jurusan_encoded'] = df_new['Jurusan'].apply(lambda x: le_jurusan.transform([x])[0] if x in le_jurusan.classes_ else -1)
 
-    # Identify one-hot columns from training features
-    one_hot_training_cols = [
-        col for col in TRAINING_FEATURE_COLUMNS
-        if col.startswith('Jenis_Kelamin_') or col.startswith('Status_Bekerja_')
-    ]
+    # Identifikasi kolom one-hot dari training_feature_columns
+    one_hot_training_cols = [col for col in training_feature_columns if col.startswith('Jenis_Kelamin_') or col.startswith('Status_Bekerja_')]
 
-    # Apply One-Hot Encoding
+    # Terapkan One-Hot Encoding pada 'Jenis_Kelamin' dan 'Status_Bekerja'
     df_onehot_new = pd.get_dummies(df_new[['Jenis_Kelamin', 'Status_Bekerja']], prefix=['Jenis_Kelamin', 'Status_Bekerja'])
     df_onehot_new = df_onehot_new.astype(int)
 
-    # Ensure all training one-hot columns are present, fill with 0 if not
-    for col in one_hot_training_cols:
-        if col not in df_onehot_new.columns:
-            df_onehot_new[col] = 0
+    # Pastikan semua kolom one-hot dari pelatihan ada, dan isi dengan 0 jika tidak ada
+    df_onehot_final = pd.DataFrame(0, index=df_new.index, columns=one_hot_training_cols)
+    for col in df_onehot_new.columns:
+        if col in df_onehot_final.columns:
+            df_onehot_final[col] = df_onehot_new[col]
 
-    # Combine all features for scaling
+    # Gabungkan semua fitur menjadi satu DataFrame sementara
     input_for_scaling = pd.DataFrame(index=[0])
-    input_for_scaling['Usia'] = df_new['Usia']
-    input_for_scaling['Durasi_Jam'] = df_new['Durasi_Jam']
-    input_for_scaling['Nilai_Ujian'] = df_new['Nilai_Ujian']
-    input_for_scaling['Pendidikan'] = df_new['Pendidikan_encoded']
-    input_for_scaling['Jurusan'] = df_new['Jurusan_encoded']
+    input_for_scaling['Usia'] = df_new['Usia'].iloc[0]
+    input_for_scaling['Durasi_Jam'] = df_new['Durasi_Jam'].iloc[0]
+    input_for_scaling['Nilai_Ujian'] = df_new['Nilai_Ujian'].iloc[0]
+    input_for_scaling['Pendidikan'] = df_new['Pendidikan_encoded'].iloc[0] # Gunakan kolom hasil encoding
+    input_for_scaling['Jurusan'] = df_new['Jurusan_encoded'].iloc[0]       # Gunakan kolom hasil encoding
 
-    for col in one_hot_training_cols:
-        input_for_scaling[col] = df_onehot_new[col]
+    # Tambahkan kolom one-hot encoded
+    input_for_scaling = pd.concat([input_for_scaling, df_onehot_final], axis=1)
 
-    # Reorder columns to match the training feature columns
-    input_for_scaling = input_for_scaling[TRAINING_FEATURE_COLUMNS]
+    # Pastikan urutan kolom sesuai dengan training_feature_columns (X.columns)
+    input_for_scaling = input_for_scaling[training_feature_columns] # Reorder to match X.columns
 
-    # Apply StandardScaler
+    # Terapkan StandardScaler
     scaled_data = loaded_scaler.transform(input_for_scaling)
-    final_features_df = pd.DataFrame(scaled_data, columns=TRAINING_FEATURE_COLUMNS)
+    final_features_df = pd.DataFrame(scaled_data, columns=training_feature_columns)
 
     return final_features_df
 
-st.set_page_config(layout="wide")
+# --- 4. Streamlit UI ---
+st.set_page_config(page_title="Prediksi Gaji Pertama", layout="centered") # Konfigurasi halaman
+st.title("Prediksi Gaji Pertama Setelah Pelatihan Vokasi")
+st.markdown("Aplikasi ini memprediksi estimasi gaji pertama berdasarkan data pelatihan vokasi. Masukkan data peserta di sidebar dan klik 'Prediksi Gaji'.")
 
-st.title("Prediksi Gaji Pertama Lulusan Pelatihan Vokasi")
-st.markdown("Aplikasi ini memprediksi estimasi gaji pertama (dalam juta Rupiah) bagi lulusan pelatihan vokasi berdasarkan beberapa parameter.")
+# Input dari pengguna di sidebar
+st.sidebar.header("Input Data Peserta")
+with st.sidebar.form("input_form"): # Menggunakan form untuk mengelompokkan input
+    usia = st.slider("Usia (Tahun)", min_value=18, max_value=60, value=25)
+    durasi_jam = st.slider("Durasi Pelatihan (Jam)", min_value=20, max_value=100, value=60)
+    nilai_ujian = st.slider("Nilai Ujian", min_value=0.0, max_value=100.0, value=75.0, step=0.1)
+    pendidikan = st.selectbox("Pendidikan Terakhir", pendidikan_categories, index=2) # 'SMA' is index 2
+    jurusan = st.selectbox("Jurusan Pelatihan", jurusan_categories, index=1) # 'Desain Grafis' is index 1
+    jenis_kelamin = st.radio("Jenis Kelamin", ['Laki-laki', 'Wanita'], index=1) # 'Wanita' is index 1
+    status_bekerja = st.radio("Status Setelah Pelatihan", ['Sudah Bekerja', 'Belum Bekerja'], index=0) # 'Sudah Bekerja' is index 0
 
-with st.sidebar:
-    st.header("Input Data Peserta")
-    st.markdown("Isi data berikut untuk mendapatkan prediksi gaji:")
+    submit_button = st.form_submit_button("Prediksi Gaji")
 
-    with st.form("input_form"):
-        usia = st.slider("Usia", min_value=18, max_value=60, value=25)
-        jenis_kelamin = st.selectbox("Jenis Kelamin", ['Laki-laki', 'Wanita'])
-        pendidikan = st.selectbox("Pendidikan", PENDIDIKAN_CATEGORIES)
-        jurusan = st.selectbox("Jurusan", JURUSAN_CATEGORIES)
-        durasi_jam = st.slider("Durasi Pelatihan (Jam)", min_value=20, max_value=100, value=60)
-        nilai_ujian = st.slider("Nilai Ujian Akhir", min_value=50.0, max_value=100.0, value=75.0, step=0.1)
-        status_bekerja = st.selectbox("Status Pekerjaan Saat Ini", ['Belum Bekerja', 'Sudah Bekerja'])
-
-        submitted = st.form_submit_button("Prediksi Gaji")
-
-if submitted:
-    new_data = {
+# Logika prediksi setelah tombol ditekan
+if submit_button:
+    new_data_input = {
         'Usia': usia,
-        'Jenis_Kelamin': jenis_kelamin,
-        'Pendidikan': pendidikan,
-        'Jurusan': jurusan,
         'Durasi_Jam': durasi_jam,
         'Nilai_Ujian': nilai_ujian,
+        'Pendidikan': pendidikan,
+        'Jurusan': jurusan,
+        'Jenis_Kelamin': jenis_kelamin,
         'Status_Bekerja': status_bekerja
     }
 
-    try:
-        processed_data = preprocess_input(new_data)
-        predicted_gaji = loaded_model.predict(processed_data)[0]
+    # Preprocess data baru
+    processed_input = preprocess_new_data(new_data_input)
 
-        st.subheader("Hasil Prediksi Gaji Pertama")
-        st.metric(label="Estimasi Gaji Pertama (Juta Rupiah)", value=f"Rp {predicted_gaji:.2f} Juta")
+    # Lakukan prediksi
+    predicted_gaji = loaded_model.predict(processed_input)
 
-        st.subheader("Detail Input Data Anda:")
-        st.write(pd.DataFrame([new_data]))
+    st.subheader("\nHasil Prediksi:")
+    st.success(f"Gaji Pertama yang Diprediksi: **Rp {predicted_gaji[0]*1000000:.2f}** (sekitar {predicted_gaji[0]:.2f} Juta Rupiah)")
+    st.write("\n---")
+    st.info("**Penting:** Pastikan file `gradient_boosting_model.pkl` dan `scaler.pkl` berada di direktori yang sama dengan file `app.py` Anda. Jika Anda menjalankan ini di Google Colab, Anda perlu mengunduh file `.pkl` ke lingkungan lokal Anda dan menjalankannya dengan Streamlit di sana.")
 
-    except Exception as e:
-        st.error(f"Terjadi kesalahan saat memproses atau memprediksi data: {e}")
-
-st.markdown("""
-<style>
-.stMetric > div > div > div {
-    font-size: 3em;
-    font-weight: bold;
-    color: #4CAF50;
-}
-</style>
-""", unsafe_allow_html=True)
-"""
-
-# Display the Streamlit app code
-print("Berikut adalah kode untuk aplikasi Streamlit Anda:")
-print("```python")
-print(streamlit_code)
-print("```")
-
-# Provide instructions to run Streamlit
-print("\nUntuk menjalankan aplikasi Streamlit ini:")
-print("1. Salin kode di atas.")
-print("2. Simpan kode tersebut ke dalam sebuah file, misalnya `app.py`, di direktori yang sama dengan file model (`gradient_boosting_model.pkl`) dan scaler (`scaler.pkl`).")
-print("3. Buka terminal atau command prompt.")
-print("4. Pastikan Anda telah menginstal Streamlit (`pip install streamlit pandas scikit-learn`).")
-print("5. Navigasi ke direktori tempat Anda menyimpan `app.py`.")
-print("6. Jalankan perintah: `streamlit run app.py`")
-print("\nAplikasi akan terbuka di browser web default Anda.")
+else:
+    st.info("Isi detail peserta di sidebar dan klik 'Prediksi Gaji' untuk melihat hasil estimasi gaji pertama.")
